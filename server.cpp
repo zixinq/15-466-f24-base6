@@ -2,6 +2,7 @@
 #include "Connection.hpp"
 
 #include "hex_dump.hpp"
+#include "PlayMode.hpp"
 
 #include "Game.hpp"
 
@@ -72,7 +73,14 @@ int main(int argc, char **argv) {
 					//client connected:
 
 					//create some player info for them:
-					connection_to_player.emplace(c, game.spawn_player());
+					//connection_to_player.emplace(c, game.spawn_player());
+                    Player* new_player = new Player();
+                    new_player->index = static_cast<int>(connection_to_player.size());
+                    new_player->score = 0;
+                    new_player->has_selected_card = false;
+                    new_player->selected_card_index = -1;
+
+                    connection_to_player.emplace(c, new_player);
 
 				} else if (evt == Connection::OnClose) {
 					//client disconnected:
@@ -93,8 +101,13 @@ int main(int argc, char **argv) {
 						bool handled_message;
 						do {
 							handled_message = false;
-							if (player.controls.recv_controls_message(c)) handled_message = true;
+							if (game.recv_state_message(c)) handled_message = true;
 							//TODO: extend for more message types as needed
+                            //card selection
+                            if (player.has_selected_card) {
+                                game.flip_card(player.selected_card_index, player);
+                                player.has_selected_card = false;
+                            }
 						} while (handled_message);
 					} catch (std::exception const &e) {
 						std::cout << "Disconnecting client:" << e.what() << std::endl;

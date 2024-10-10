@@ -8,75 +8,76 @@
 
 #include <glm/gtx/norm.hpp>
 
-void Player::Controls::send_controls_message(Connection *connection_) const {
-	assert(connection_);
-	auto &connection = *connection_;
 
-	uint32_t size = 5;
-	connection.send(Message::C2S_Controls);
-	connection.send(uint8_t(size));
-	connection.send(uint8_t(size >> 8));
-	connection.send(uint8_t(size >> 16));
+void Game::initialize_board() {
+    std::vector<int> values;
+    for (int i = 0; i < (rows * cols) / 2; ++i) {
+        values.push_back(i);
+        values.push_back(i);
+    }
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(values.begin(), values.end(), g);
 
-	auto send_button = [&](Button const &b) {
-		if (b.downs & 0x80) {
-			std::cerr << "Wow, you are really good at pressing buttons!" << std::endl;
-		}
-		connection.send(uint8_t( (b.pressed ? 0x80 : 0x00) | (b.downs & 0x7f) ) );
-	};
-
-	send_button(left);
-	send_button(right);
-	send_button(up);
-	send_button(down);
-	send_button(jump);
+    board.resize(rows, std::vector<Card>(cols));
+    int index = 0;
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            board[r][c] = {values[index++], false, false};
+        }
+    }
 }
 
-bool Player::Controls::recv_controls_message(Connection *connection_) {
-	assert(connection_);
-	auto &connection = *connection_;
+void Game::update_player_score(int playerIndex, int points) {
+    for (Player& player : players) {
+        if (player.index == playerIndex) {
+            player.score += points;
+            break;
+        }
+    }
+}
+bool Game::flip_card(int cardIndex, Player &player) {
+    int row = cardIndex / cols;
+    int col = cardIndex % cols;
+    Card &card = board[row][col];
+    if (card.matched || card.face_up) {
+        return false;
+    }
+    card.face_up = true; // Flip the card
 
-	auto &recv_buffer = connection.recv_buffer;
+    if (last_flipped_index < 0) {
+        last_flipped_index = cardIndex;
+    } else {
+        Card &last_card = board[last_flipped_index / cols][last_flipped_index % cols];
+        if (last_card.value == card.value) {
+            card.matched = true;
+            last_card.matched = true;
+            update_player_score(current_player_index, 1);
+        } else {
+            schedule_flip_back(last_flipped_index, cardIndex);
+        }
+        last_flipped_index = -1;
+    }
+    return true;
+}
 
-	//expecting [type, size_low0, size_mid8, size_high8]:
-	if (recv_buffer.size() < 4) return false;
-	if (recv_buffer[0] != uint8_t(Message::C2S_Controls)) return false;
-	uint32_t size = (uint32_t(recv_buffer[3]) << 16)
-	              | (uint32_t(recv_buffer[2]) << 8)
-	              |  uint32_t(recv_buffer[1]);
-	if (size != 5) throw std::runtime_error("Controls message with size " + std::to_string(size) + " != 5!");
-	
-	//expecting complete message:
-	if (recv_buffer.size() < 4 + size) return false;
 
-	auto recv_button = [](uint8_t byte, Button *button) {
-		button->pressed = (byte & 0x80);
-		uint32_t d = uint32_t(button->downs) + uint32_t(byte & 0x7f);
-		if (d > 255) {
-			std::cerr << "got a whole lot of downs" << std::endl;
-			d = 255;
-		}
-		button->downs = uint8_t(d);
-	};
-
-	recv_button(recv_buffer[4+0], &left);
-	recv_button(recv_buffer[4+1], &right);
-	recv_button(recv_buffer[4+2], &up);
-	recv_button(recv_buffer[4+3], &down);
-	recv_button(recv_buffer[4+4], &jump);
-
-	//delete message from buffer:
-	recv_buffer.erase(recv_buffer.begin(), recv_buffer.begin() + 4 + size);
-
-	return true;
+void Game::reset_board() {
+    for (auto &row : board) {
+        for (auto &card : row) {
+            card.face_up = false;
+            card.matched = false;
+        }
+    }
 }
 
 
 //-----------------------------------------
 
 Game::Game() : mt(0x15466666) {
+    initialize_board();
 }
-
+/*
 Player *Game::spawn_player() {
 	players.emplace_back();
 	Player &player = players.back();
@@ -96,6 +97,7 @@ Player *Game::spawn_player() {
 
 	return &player;
 }
+*/
 
 void Game::remove_player(Player *player) {
 	bool found = false;
@@ -109,82 +111,65 @@ void Game::remove_player(Player *player) {
 	assert(found);
 }
 
+
 void Game::update(float elapsed) {
-	//position/velocity update:
-	for (auto &p : players) {
-		glm::vec2 dir = glm::vec2(0.0f, 0.0f);
-		if (p.controls.left.pressed) dir.x -= 1.0f;
-		if (p.controls.right.pressed) dir.x += 1.0f;
-		if (p.controls.down.pressed) dir.y -= 1.0f;
-		if (p.controls.up.pressed) dir.y += 1.0f;
+    if (waiting_for_flip_back && flip_back_timer > 0.0f) {
+        flip_back_timer -= elapsed;
+        if (flip_back_timer <= 0.0f) {
+            // Flip back cards
+            for (auto &row : board) {
+                for (auto &card : row) {
+                    if (!card.matched && card.face_up) {
+                        card.face_up = false; // Flip card back down
+                    }
+                }
+            }
+            waiting_for_flip_back = false; // Reset the flip back flag
+        }
+    }
 
-		if (dir == glm::vec2(0.0f)) {
-			//no inputs: just drift to a stop
-			float amt = 1.0f - std::pow(0.5f, elapsed / (PlayerAccelHalflife * 2.0f));
-			p.velocity = glm::mix(p.velocity, glm::vec2(0.0f,0.0f), amt);
-		} else {
-			//inputs: tween velocity to target direction
-			dir = glm::normalize(dir);
+    for (Player &player : players) {
+        if (player.has_selected_card) {
+            // Attempt to flip the selected card
+            bool success = flip_card(player.selected_card_index, player);
+            
+            if (success) {
+                // Check if the game should end
+                if (check_all_cards_matched()) {
+                    end_game();
+                }
+            }
+            player.has_selected_card = false; // Reset selection state
+        }
+    }
+    
+    // Check if all matches are found
+    if (check_all_cards_matched()) {
+        end_game();
+    }
+}
 
-			float amt = 1.0f - std::pow(0.5f, elapsed / PlayerAccelHalflife);
 
-			//accelerate along velocity (if not fast enough):
-			float along = glm::dot(p.velocity, dir);
-			if (along < PlayerSpeed) {
-				along = glm::mix(along, PlayerSpeed, amt);
-			}
+void Game::schedule_flip_back(int firstCardIndex, int secondCardIndex) {
+    // Logic for scheduling cards to flip back
+    waiting_for_flip_back = true;
+    flip_back_timer = 1.0f; // Time after which cards should flip back
+}
 
-			//damp perpendicular velocity:
-			float perp = glm::dot(p.velocity, glm::vec2(-dir.y, dir.x));
-			perp = glm::mix(perp, 0.0f, amt);
+bool Game::check_all_cards_matched() {
+    for (const auto &row : board) {
+        for (const auto &card : row) {
+            if (!card.matched) return false; // Found an unmatched card
+        }
+    }
+    return true;
+}
 
-			p.velocity = dir * along + glm::vec2(-dir.y, dir.x) * perp;
-		}
-		p.position += p.velocity * elapsed;
-
-		//reset 'downs' since controls have been handled:
-		p.controls.left.downs = 0;
-		p.controls.right.downs = 0;
-		p.controls.up.downs = 0;
-		p.controls.down.downs = 0;
-		p.controls.jump.downs = 0;
-	}
-
-	//collision resolution:
-	for (auto &p1 : players) {
-		//player/player collisions:
-		for (auto &p2 : players) {
-			if (&p1 == &p2) break;
-			glm::vec2 p12 = p2.position - p1.position;
-			float len2 = glm::length2(p12);
-			if (len2 > (2.0f * PlayerRadius) * (2.0f * PlayerRadius)) continue;
-			if (len2 == 0.0f) continue;
-			glm::vec2 dir = p12 / std::sqrt(len2);
-			//mirror velocity to be in separating direction:
-			glm::vec2 v12 = p2.velocity - p1.velocity;
-			glm::vec2 delta_v12 = dir * glm::max(0.0f, -1.75f * glm::dot(dir, v12));
-			p2.velocity += 0.5f * delta_v12;
-			p1.velocity -= 0.5f * delta_v12;
-		}
-		//player/arena collisions:
-		if (p1.position.x < ArenaMin.x + PlayerRadius) {
-			p1.position.x = ArenaMin.x + PlayerRadius;
-			p1.velocity.x = std::abs(p1.velocity.x);
-		}
-		if (p1.position.x > ArenaMax.x - PlayerRadius) {
-			p1.position.x = ArenaMax.x - PlayerRadius;
-			p1.velocity.x =-std::abs(p1.velocity.x);
-		}
-		if (p1.position.y < ArenaMin.y + PlayerRadius) {
-			p1.position.y = ArenaMin.y + PlayerRadius;
-			p1.velocity.y = std::abs(p1.velocity.y);
-		}
-		if (p1.position.y > ArenaMax.y - PlayerRadius) {
-			p1.position.y = ArenaMax.y - PlayerRadius;
-			p1.velocity.y =-std::abs(p1.velocity.y);
-		}
-	}
-
+void Game::end_game() {
+    std::cout << "Game over! Scores:\n";
+    for (const auto &player : players) {
+        std::cout << "Player " << player.index << ": " << player.score << "\n";
+    }
 }
 
 
@@ -200,26 +185,26 @@ void Game::send_state_message(Connection *connection_, Player *connection_player
 	size_t mark = connection.send_buffer.size(); //keep track of this position in the buffer
 
 
-	//send player info helper:
 	auto send_player = [&](Player const &player) {
-		connection.send(player.position);
-		connection.send(player.velocity);
-		connection.send(player.color);
-	
-		//NOTE: can't just 'send(name)' because player.name is not plain-old-data type.
-		//effectively: truncates player name to 255 chars
-		uint8_t len = uint8_t(std::min< size_t >(255, player.name.size()));
-		connection.send(len);
-		connection.send_buffer.insert(connection.send_buffer.end(), player.name.begin(), player.name.begin() + len);
+		connection.send(player.index);
+		connection.send(player.score);
 	};
 
 	//player count:
 	connection.send(uint8_t(players.size()));
 	if (connection_player) send_player(*connection_player);
 	for (auto const &player : players) {
-		if (&player == connection_player) continue;
+		//if (&player == connection_player) continue;
 		send_player(player);
 	}
+    
+    // Send the board
+    for (const auto &row : board) {
+        for (const auto &card : row) {
+            uint8_t card_info = (card.face_up ? 0x80 : 0x00) | (card.matched ? 0x40 : 0x00) | (card.value & 0x3F);
+            connection.send(card_info);
+        }
+    }
 
 	//compute the message size and patch into the message header:
 	uint32_t size = uint32_t(connection.send_buffer.size() - mark);
@@ -257,21 +242,23 @@ bool Game::recv_state_message(Connection *connection_) {
 	for (uint8_t i = 0; i < player_count; ++i) {
 		players.emplace_back();
 		Player &player = players.back();
-		read(&player.position);
-		read(&player.velocity);
-		read(&player.color);
-		uint8_t name_len;
-		read(&name_len);
-		//n.b. would probably be more efficient to directly copy from recv_buffer, but I think this is clearer:
-		player.name = "";
-		for (uint8_t n = 0; n < name_len; ++n) {
-			char c;
-			read(&c);
-			player.name += c;
-		}
+		read(&player.index);
+		read(&player.score);
 	}
+    
+    for (auto &row : board) {
+        for (auto &card : row) {
+            uint8_t card_info;
+            memcpy(&card_info, &recv_buffer[at], sizeof(card_info));
+            at += sizeof(card_info);
 
-	if (at != size) throw std::runtime_error("Trailing data in state message.");
+            card.face_up = card_info & 0x80;
+            card.matched = card_info & 0x40;
+            card.value = card_info & 0x3F;
+        }
+    }
+
+	if (at != 4 + size) throw std::runtime_error("Trailing data in state message.");
 
 	//delete message from buffer:
 	recv_buffer.erase(recv_buffer.begin(), recv_buffer.begin() + 4 + size);
