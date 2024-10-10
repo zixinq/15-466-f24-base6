@@ -1,10 +1,12 @@
-# (TODO: your game's title)
+# Color Match
 
-Author: (TODO: your name)
+Author: Zixin Qiu
 
-Design: (TODO: In two sentences or fewer, describe what is new and interesting about your game.)
+Design: Multiplayer memory match game
 
-Networking: (TODO: How does your game implement client/server multiplayer? What messages are transmitted? Where in the code?)
+Networking: The server maintains the card positions, and checks for the matches. It receives actions from clients by mouse clicking on the card, updates the game state, and sends to the clients. 
+
+
 
 Screen Shot:
 
